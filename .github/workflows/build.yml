@@ -1,0 +1,32 @@
+name: Gerar instalador
+
+on:
+  workflow_dispatch:        # botão "Run workflow" na aba Actions
+  push:
+    branches: [main, master]
+    tags: ['v*']            # ao criar uma tag v1.0.0, publica um Release com o .exe
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gerar ScreenCam_Setup.exe
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Guardar o instalador
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenCam_Setup
+          path: installer/Output/ScreenCam_Setup.exe
+
+      - name: Publicar Release (somente em tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/Output/ScreenCam_Setup.exe
