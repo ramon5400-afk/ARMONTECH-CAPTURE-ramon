@@ -46,7 +46,7 @@ foreach ($b in 'sc_mediamtx.exe', 'sc_ffmpeg.exe') {
 # 6) Firewall (RTSP 554, ONVIF 8080, painel 8090, RTP/UDP 8000-8001)
 Get-NetFirewallRule -DisplayName 'ScreenCam*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName 'ScreenCam TCP' -Direction Inbound -Protocol TCP -LocalPort 554, 8080, 8090 -Action Allow -Profile Any | Out-Null
-New-NetFirewallRule -DisplayName 'ScreenCam UDP' -Direction Inbound -Protocol UDP -LocalPort 8000, 8001 -Action Allow -Profile Any | Out-Null
+New-NetFirewallRule -DisplayName 'ScreenCam UDP' -Direction Inbound -Protocol UDP -LocalPort 8000, 8001, 3702 -Action Allow -Profile Any | Out-Null
 
 # 7) Inicio automatico ao fazer logon (a captura precisa da sessao do usuario)
 $a = New-ScheduledTaskAction -Execute $py -Argument "`"$dest\screencam.py`"" -WorkingDirectory $dest

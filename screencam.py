@@ -22,6 +22,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from urllib.parse import quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.sax.saxutils import escape
 import xml.etree.ElementTree as ET
@@ -177,6 +179,8 @@ class Engine:
             "  permissions:\n"
             "  - action: publish\n"
             "    path: live\n"
+            "  - action: read\n"
+            "    path: live\n"
             "- user: %s\n"
             "  pass: %s\n"
             "  ips: []\n"
@@ -268,7 +272,8 @@ class Engine:
                         # espera um pouco entre tentativas para nao entrar em loop apertado
                         if time.time() - self.ff_started > 3:
                             self.ff_restarts += 1
-                            log("FFmpeg parou (codigo %s) - reiniciando" % (self.ff.poll() if self.ff else "?"))
+                            log("FFmpeg parou (codigo %s) - reiniciando. Ultimas linhas: %s" % (
+                                self.ff.poll() if self.ff else "?", " | ".join(tail(FF_LOG, 3).splitlines())))
                             self._start_ff(c)
             except Exception as e:  # watchdog nunca pode morrer
                 log("erro no watchdog: %r" % e)
@@ -290,6 +295,7 @@ def restart_self():
 NS = ('xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
       'xmlns:tds="http://www.onvif.org/ver10/device/wsdl" '
       'xmlns:trt="http://www.onvif.org/ver10/media/wsdl" '
+      'xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" '
       'xmlns:tt="http://www.onvif.org/ver10/schema" '
       'xmlns:ter="http://www.onvif.org/ver10/error"')
 PUBLIC_ACTIONS = {"GetSystemDateAndTime", "GetCapabilities", "GetServices", "GetServiceCapabilities"}
@@ -363,6 +369,7 @@ def onvif_response(action, c, host):
     """Retorna (http_status, bytes)."""
     dev = "http://%s:%d/onvif/device_service" % (host, c["onvif_port"])
     med = "http://%s:%d/onvif/media_service" % (host, c["onvif_port"])
+    img = "http://%s:%d/onvif/imaging_service" % (host, c["onvif_port"])
     ow, oh = out_size(c)
     if action == "GetSystemDateAndTime":
         n = datetime.datetime.now(datetime.timezone.utc)
@@ -378,13 +385,15 @@ def onvif_response(action, c, host):
             '<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Device><tt:XAddr>%s</tt:XAddr></tt:Device>'
             '<tt:Media><tt:XAddr>%s</tt:XAddr><tt:StreamingCapabilities><tt:RTPMulticast>false</tt:RTPMulticast>'
             '<tt:RTP_TCP>true</tt:RTP_TCP><tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP></tt:StreamingCapabilities></tt:Media>'
-            '</tds:Capabilities></tds:GetCapabilitiesResponse>' % (dev, med))
+            '<tt:Imaging><tt:XAddr>%s</tt:XAddr></tt:Imaging>'
+            '</tds:Capabilities></tds:GetCapabilitiesResponse>' % (dev, med, img))
     if action == "GetServices":
         svc = ('<tds:Service><tds:Namespace>%s</tds:Namespace><tds:XAddr>%s</tds:XAddr>'
                '<tds:Version><tt:Major>2</tt:Major><tt:Minor>0</tt:Minor></tds:Version></tds:Service>')
         return 200, envelope('<tds:GetServicesResponse>%s%s</tds:GetServicesResponse>' % (
             svc % ("http://www.onvif.org/ver10/device/wsdl", dev),
-            svc % ("http://www.onvif.org/ver10/media/wsdl", med)))
+            svc % ("http://www.onvif.org/ver10/media/wsdl", med) +
+            svc % ("http://www.onvif.org/ver20/imaging/wsdl", img)))
     if action == "GetServiceCapabilities":
         return 200, envelope('<tds:GetServiceCapabilitiesResponse><tds:Capabilities/></tds:GetServiceCapabilitiesResponse>')
     if action == "GetDeviceInformation":
@@ -426,6 +435,27 @@ def onvif_response(action, c, host):
     if action == "GetVideoEncoderConfiguration":
         return 200, envelope('<trt:GetVideoEncoderConfigurationResponse>%s</trt:GetVideoEncoderConfigurationResponse>'
                              % vec_xml("trt:Configuration", c, ow, oh))
+    if action == "GetImagingSettings":
+        return 200, envelope(
+            '<timg:GetImagingSettingsResponse><timg:ImagingSettings><tt:Brightness>50</tt:Brightness>'
+            '<tt:ColorSaturation>50</tt:ColorSaturation><tt:Contrast>50</tt:Contrast><tt:Sharpness>50</tt:Sharpness>'
+            '</timg:ImagingSettings></timg:GetImagingSettingsResponse>')
+    if action == "GetOptions":
+        rng = '<tt:%s><tt:Min>0</tt:Min><tt:Max>100</tt:Max></tt:%s>'
+        return 200, envelope('<timg:GetOptionsResponse><timg:ImagingOptions>%s</timg:ImagingOptions></timg:GetOptionsResponse>'
+                             % "".join(rng % (n, n) for n in ("Brightness", "ColorSaturation", "Contrast", "Sharpness")))
+    if action == "SetImagingSettings":
+        return 200, envelope('<timg:SetImagingSettingsResponse/>')
+    if action == "GetVideoEncoderConfigurationOptions":
+        return 200, envelope(
+            '<trt:GetVideoEncoderConfigurationOptionsResponse><trt:Options>'
+            '<tt:QualityRange><tt:Min>1</tt:Min><tt:Max>10</tt:Max></tt:QualityRange><tt:H264>'
+            '<tt:ResolutionsAvailable><tt:Width>%d</tt:Width><tt:Height>%d</tt:Height></tt:ResolutionsAvailable>'
+            '<tt:GovLengthRange><tt:Min>1</tt:Min><tt:Max>60</tt:Max></tt:GovLengthRange>'
+            '<tt:FrameRateRange><tt:Min>1</tt:Min><tt:Max>30</tt:Max></tt:FrameRateRange>'
+            '<tt:EncodingIntervalRange><tt:Min>1</tt:Min><tt:Max>1</tt:Max></tt:EncodingIntervalRange>'
+            '<tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported></tt:H264>'
+            '</trt:Options></trt:GetVideoEncoderConfigurationOptionsResponse>' % (ow, oh))
     return 400, fault("ter:ActionNotSupported", "Action not supported: %s" % action)
 
 
@@ -468,6 +498,136 @@ class OnvifHandler(BaseHTTPRequestHandler):
         self._send(code, data)
 
 
+# --------------------------------------------------------- WS-Discovery (Buscar no DVR)
+WSD_GROUP = "239.255.255.250"
+WSD_PORT = 3702
+DEVICE_UUID = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_DNS, "screencam-" + socket.gethostname() + "-%012x" % uuid.getnode()))
+
+
+def ip_for(remote):
+    """IP local da interface usada para falar com 'remote' (o DVR que fez a busca)."""
+    try:
+        t = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        t.connect((remote, 9))
+        ip = t.getsockname()[0]
+        t.close()
+        return ip
+    except OSError:
+        return local_ip()
+
+
+def probe_match(relates_to, c, ip):
+    name = quote(c["device_name"].replace(" ", "_"), safe="_-")
+    scopes = ("onvif://www.onvif.org/type/video_encoder onvif://www.onvif.org/Profile/Streaming "
+              "onvif://www.onvif.org/name/%s onvif://www.onvif.org/hardware/ScreenCam "
+              "onvif://www.onvif.org/location/" % name)
+    return ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
+            'xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" '
+            'xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" '
+            'xmlns:dn="http://www.onvif.org/ver10/network/wsdl" '
+            'xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><s:Header>'
+            '<a:MessageID>urn:uuid:%s</a:MessageID><a:RelatesTo>%s</a:RelatesTo>'
+            '<a:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:To>'
+            '<a:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</a:Action></s:Header>'
+            '<s:Body><d:ProbeMatches><d:ProbeMatch><a:EndpointReference><a:Address>%s</a:Address></a:EndpointReference>'
+            '<d:Types>dn:NetworkVideoTransmitter tds:Device</d:Types><d:Scopes>%s</d:Scopes>'
+            '<d:XAddrs>http://%s:%d/onvif/device_service</d:XAddrs><d:MetadataVersion>1</d:MetadataVersion>'
+            '</d:ProbeMatch></d:ProbeMatches></s:Body></s:Envelope>'
+            % (uuid.uuid4(), escape(relates_to or ""), DEVICE_UUID, escape(scopes), ip, c["onvif_port"])).encode("utf-8")
+
+
+def discovery_loop():
+    """Responde as buscas ONVIF (WS-Discovery) para o PC aparecer na lista 'Buscar' do DVR."""
+    s = None
+    for attempt in range(20):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("", WSD_PORT))
+            break
+        except OSError as e:
+            s = None
+            if attempt == 19:
+                log("AVISO: descoberta automatica indisponivel (UDP %d): %s" % (WSD_PORT, e))
+                return
+            time.sleep(1)
+    ips = set()
+    try:
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    ips.add(local_ip())
+    joined = 0
+    for ip in ips:
+        if ip.startswith("127."):
+            continue
+        try:
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                         socket.inet_aton(WSD_GROUP) + socket.inet_aton(ip))
+            joined += 1
+        except OSError:
+            pass
+    log("Descoberta automatica (WS-Discovery) ativa em %d interface(s)" % joined)
+    while True:
+        try:
+            data, addr = s.recvfrom(65535)
+            root = ET.fromstring(data)
+        except (OSError, ET.ParseError):
+            continue
+        is_probe, msgid, types = False, None, ""
+        for el in root.iter():
+            n = lname(el.tag)
+            if n == "Action" and (el.text or "").strip().endswith("/Probe"):
+                is_probe = True
+            elif n == "MessageID":
+                msgid = (el.text or "").strip()
+            elif n == "Types":
+                types = el.text or ""
+        if not is_probe or (types and "NetworkVideoTransmitter" not in types and "Device" not in types):
+            continue
+        try:
+            time.sleep(0.05 + (uuid.uuid4().int % 100) / 1000.0)  # pequeno atraso aleatorio (padrao WS-Discovery)
+            s.sendto(probe_match(msgid, get_cfg(), ip_for(addr[0])), addr)
+            log("Descoberta: respondi a busca de %s" % addr[0])
+        except OSError as e:
+            log("Descoberta: falha ao responder %s: %s" % (addr[0], e))
+
+
+# ------------------------------------------------------- teste de captura (painel)
+_snap_lock = threading.Lock()
+
+
+def snapshot():
+    """Retorna (jpeg_bytes, origem, erro). Tenta a transmissao enviada ao DVR; se nao houver, captura direto."""
+    c = get_cfg()
+    ff = os.path.join(BIN, "sc_ffmpeg" + EXE)
+    if not os.path.exists(ff):
+        return None, None, "FFmpeg nao encontrado em bin\\"
+    flags = 0x08000000 if IS_WIN else 0
+    tries = [("stream", [ff, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
+                         "-i", "rtsp://127.0.0.1:%d/live" % int(c["rtsp_port"]),
+                         "-frames:v", "1", "-f", "mjpeg", "-q:v", "4", "pipe:1"])]
+    x, y, w, h = screen_geometry(c)
+    ow, oh = out_size(c)
+    direct = [ff, "-hide_banner", "-loglevel", "error", "-f", "gdigrab", "-framerate", "1", "-draw_mouse", "1"]
+    if c["monitor"] != "all":
+        direct += ["-offset_x", str(x), "-offset_y", str(y), "-video_size", "%dx%d" % (w, h)]
+    direct += ["-i", "desktop", "-frames:v", "1", "-vf", "scale=%d:%d" % (ow, oh), "-f", "mjpeg", "-q:v", "4", "pipe:1"]
+    tries.append(("direto", direct))
+    err = ""
+    with _snap_lock:
+        for origem, cmd in tries:
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=10, creationflags=flags, cwd=BIN)
+                if r.returncode == 0 and len(r.stdout) > 1000:
+                    return r.stdout, origem, ""
+                err = (r.stderr or b"").decode("utf-8", "replace").strip()[-200:] or "sem imagem"
+            except (subprocess.TimeoutExpired, OSError) as e:
+                err = "tempo esgotado" if isinstance(e, subprocess.TimeoutExpired) else str(e)
+    return None, None, err
+
+
 # --------------------------------------------------------------------- painel
 PANEL_HTML = """<!doctype html><html lang="pt-br"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -493,7 +653,7 @@ code{background:var(--bg);padding:2px 5px;border-radius:4px}
 <div class="card"><b>Status</b>
  <p><span id="d1" class="dot"></span>Servidor RTSP &nbsp; <span id="d2" class="dot"></span>Captura de tela &nbsp;
  <span style="color:var(--mut)" id="up"></span></p>
- <p style="margin:0">No DVR: protocolo <b>Onvif</b>, IP <code id="ip"></code>, porta HTTP <code id="po"></code>,
+ <p style="margin:0">No DVR: clique em <b>Buscar</b> (ele aparece na lista) ou use Ad. Manual: protocolo <b>Onvif</b>, IP <code id="ip"></code>, porta HTTP <code id="po"></code>,
  porta RTSP <code id="pr"></code>.<br>Teste no VLC: <code id="url"></code> &nbsp; Video: <span id="res"></span></p></div>
 <div class="card"><b>Configuracao</b>
  <div class="row"><label>Nome do dispositivo<input id="device_name"></label>
@@ -507,6 +667,12 @@ code{background:var(--bg);padding:2px 5px;border-radius:4px}
  <label>Porta ONVIF/HTTP<input id="onvif_port" type="number"></label>
  <label>Porta do painel<input id="panel_port" type="number"></label></div>
  <p><button onclick="save()">Salvar e aplicar</button><button class="sec" onclick="act('restart')">Reiniciar captura</button><span id="msg"></span></p></div>
+<div class="card"><b>Ver o que está sendo capturado</b>
+ <p style="margin:6px 0 10px;color:var(--mut)">Mostra a imagem que o DVR está recebendo (ou a captura direta da tela, se o vídeo ainda não estiver no ar).</p>
+ <button onclick="shot()">Testar captura</button>
+ <label style="display:inline;margin-left:6px"><input id="auto" type="checkbox" style="width:auto" onchange="auto()"> atualizar a cada 2 s</label>
+ <span id="shotmsg" style="margin-left:8px;color:var(--mut)"></span>
+ <img id="shot" alt="captura" style="display:none;max-width:100%;margin-top:12px;border:1px solid var(--bd);border-radius:6px"></div>
 <div class="card"><b>Log do FFmpeg</b><pre id="log"></pre></div>
 </main><script>
 const F=['device_name','monitor','fps','width','bitrate_kbps','username','rtsp_port','onvif_port','panel_port'];
@@ -522,6 +688,14 @@ async function save(){const b={};F.forEach(k=>b[k]=$(k).value);if($('password').
 $('msg').textContent='Aplicando...';const r=await fetch('/api/config',{method:'POST',body:JSON.stringify(b)});
 const j=await r.json();$('msg').textContent=j.ok?(j.reload?'Salvo. Programa reiniciando, reabra a pagina na nova porta.':'Salvo e aplicado.'):('Erro: '+j.error);$('password').value='';}
 async function act(a){await fetch('/api/'+a,{method:'POST'});$('msg').textContent='Reiniciando captura...';}
+let timer=null,prev=null;
+async function shot(){$('shotmsg').textContent='Capturando...';
+ try{const r=await fetch('/api/snapshot?'+Date.now());
+ if(!r.ok){let m='falha';try{m=(await r.json()).error}catch(e){}$('shotmsg').textContent='Erro: '+m;return;}
+ const u=URL.createObjectURL(await r.blob());$('shot').src=u;$('shot').style.display='block';if(prev)URL.revokeObjectURL(prev);prev=u;
+ $('shotmsg').textContent='Origem: '+(r.headers.get('X-Source')=='stream'?'vídeo enviado ao DVR':'captura direta da tela')+' - '+new Date().toLocaleTimeString();
+ }catch(e){$('shotmsg').textContent='Erro ao capturar';}}
+function auto(){clearInterval(timer);if($('auto').checked){shot();timer=setInterval(shot,2000);}}
 load();status();setInterval(status,3000);
 </script></body></html>"""
 
@@ -530,8 +704,10 @@ def tail(path, n=25):
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
-            f.seek(max(0, f.tell() - 6000))
-            return "\n".join(f.read().decode("utf-8", "replace").splitlines()[-n:])
+            f.seek(max(0, f.tell() - 20000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+            lines = [l for l in lines if "not enough frames to estimate rate" not in l]  # ruido
+            return "\n".join(lines[-n:])
     except OSError:
         return ""
 
@@ -599,11 +775,18 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not self._auth():
             return
         c = get_cfg()
-        if self.path in ("/", "/index.html"):
+        path = self.path.split("?")[0]
+        if path in ("/", "/index.html"):
             return self._send(200, PANEL_HTML, "text/html; charset=utf-8")
-        if self.path == "/api/config":
+        if path == "/api/snapshot":
+            img, origem, err = snapshot()
+            if img is None:
+                return self._send(503, {"error": err or "nao foi possivel capturar"})
+            return self._send(200, img, "image/jpeg", {"X-Source": "stream" if origem == "stream" else "direto",
+                                                       "Cache-Control": "no-store"})
+        if path == "/api/config":
             return self._send(200, {k: v for k, v in c.items() if k != "password"})
-        if self.path == "/api/status":
+        if path == "/api/status":
             rtsp, cap = ENGINE.alive()
             s = int(time.time() - ENGINE.t0)
             ow, oh = out_size(c)
@@ -663,6 +846,7 @@ def main():
     log("ScreenCam iniciando%s" % (" [modo teste]" if TEST_MODE else ""))
     serve(OnvifHandler, c["onvif_port"], "ONVIF")
     serve(PanelHandler, c["panel_port"], "Painel")
+    threading.Thread(target=discovery_loop, daemon=True).start()
     if not TEST_MODE:
         for b in ("sc_mediamtx" + EXE, "sc_ffmpeg" + EXE):
             if not os.path.exists(os.path.join(BIN, b)):

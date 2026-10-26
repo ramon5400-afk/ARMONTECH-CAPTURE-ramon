@@ -38,16 +38,33 @@ function Find-Iscc {
 }
 $iscc = Find-Iscc
 if (-not $iscc) {
+    # tenta varios enderecos e confere se o arquivo baixado e um executavel valido (cabecalho "MZ", > 1 MB)
+    $urls = @('https://files.jrsoftware.org/is/6/innosetup-6.4.3.exe', 'https://jrsoftware.org/download.php/is.exe')
     $setup = Join-Path $tmp 'innosetup.exe'
-    Get-File 'https://jrsoftware.org/download.php/is.exe' $setup
-    Start-Process $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER' -Wait
+    foreach ($u in $urls) {
+        if (Find-Iscc) { break }
+        foreach ($method in 'iwr', 'curl') {
+            try {
+                Remove-Item $setup -Force -ErrorAction SilentlyContinue
+                Write-Host "Baixando $u ($method)"
+                if ($method -eq 'iwr') { Invoke-WebRequest $u -OutFile $setup -UseBasicParsing }
+                else { & curl.exe -L --fail -s -o $setup $u }
+                $ok = (Test-Path $setup) -and ((Get-Item $setup).Length -gt 1MB)
+                if ($ok) { $b = [IO.File]::ReadAllBytes($setup)[0..1]; $ok = ($b[0] -eq 0x4D -and $b[1] -eq 0x5A) }
+                if (-not $ok) { Write-Host 'Arquivo baixado invalido, tentando outra forma...'; continue }
+                Unblock-File $setup
+                Start-Process $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER' -Wait
+                if (Find-Iscc) { break }
+            } catch { Write-Host "Falhou: $($_.Exception.Message)" }
+        }
+    }
     $iscc = Find-Iscc
 }
-if (-not $iscc) { throw 'Nao foi possivel instalar o Inno Setup. Instale manualmente (jrsoftware.org) e rode de novo.' }
+if (-not $iscc) { throw 'Nao foi possivel instalar o Inno Setup automaticamente. Instale manualmente em https://jrsoftware.org/isdl.php (versao 6) e rode este arquivo de novo; o resto ja esta baixado.' }
 
 & $iscc (Join-Path $root 'installer\ScreenCam.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao compilar o instalador.' }
 $out = Join-Path $root 'installer\Output\ScreenCam_Setup.exe'
 Write-Host ''
 Write-Host "PRONTO: $out" -ForegroundColor Green
-Start-Process explorer.exe (Split-Path $out)
+if (-not $env:CI) { Start-Process explorer.exe (Split-Path $out) }
