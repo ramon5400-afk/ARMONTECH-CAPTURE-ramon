@@ -298,6 +298,12 @@ NS = ('xmlns:s="http://www.w3.org/2003/05/soap-envelope" '
       'xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" '
       'xmlns:tt="http://www.onvif.org/ver10/schema" '
       'xmlns:ter="http://www.onvif.org/ver10/error"')
+# respostas vazias/minimas para recursos que o PC nao tem (audio, OSD, analiticos...) - evita erro 400 no DVR
+EMPTY_MEDIA = {"GetOSDs", "GetCompatibleVideoAnalyticsConfigurations", "GetVideoAnalyticsConfigurations",
+               "GetAudioSources", "GetAudioSourceConfigurations", "GetAudioEncoderConfigurations",
+               "GetCompatibleAudioSourceConfigurations", "GetCompatibleAudioEncoderConfigurations",
+               "GetMetadataConfigurations", "GetCompatibleMetadataConfigurations",
+               "GetAudioOutputs", "GetAudioOutputConfigurations"}
 PUBLIC_ACTIONS = {"GetSystemDateAndTime", "GetCapabilities", "GetServices", "GetServiceCapabilities"}
 
 
@@ -456,6 +462,14 @@ def onvif_response(action, c, host):
             '<tt:EncodingIntervalRange><tt:Min>1</tt:Min><tt:Max>1</tt:Max></tt:EncodingIntervalRange>'
             '<tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported></tt:H264>'
             '</trt:Options></trt:GetVideoEncoderConfigurationOptionsResponse>' % (ow, oh))
+    if action == "GetOSDOptions":
+        return 200, envelope('<trt:GetOSDOptionsResponse><trt:OSDOptions><tt:MaximumNumberOfOSDs Total="0"/>'
+                             '<tt:Type>Text</tt:Type><tt:PositionOption>UpperLeft</tt:PositionOption>'
+                             '</trt:OSDOptions></trt:GetOSDOptionsResponse>')
+    if action == "SetSynchronizationPoint":
+        return 200, envelope('<trt:SetSynchronizationPointResponse/>')
+    if action in EMPTY_MEDIA:
+        return 200, envelope('<trt:%sResponse/>' % action)
     return 400, fault("ter:ActionNotSupported", "Action not supported: %s" % action)
 
 
@@ -489,7 +503,12 @@ class OnvifHandler(BaseHTTPRequestHandler):
             return self._send(400, fault("ter:InvalidArgs", "Empty request"))
         c = get_cfg()
         if action not in PUBLIC_ACTIONS and not check_auth(root, c):
-            log("ONVIF: acesso negado (%s) de %s" % (action, self.client_address[0]))
+            has_token = any(lname(e.tag) == "UsernameToken" for e in root.iter())
+            http_auth = (self.headers.get("Authorization") or "").split(" ")[0]
+            log("ONVIF: acesso negado (%s) de %s - %s%s" % (
+                action, self.client_address[0],
+                "usuario/senha invalidos" if has_token else "requisicao sem credenciais WS-Security",
+                (" | cabecalho HTTP Authorization: " + http_auth) if http_auth else ""))
             return self._send(400, fault("ter:NotAuthorized", "Sender not authorized"))
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0] or local_ip()
         code, data = onvif_response(action, c, host)
