@@ -1,4 +1,4 @@
-# Gera installer\Output\ScreenCam_Setup.exe (rodar UMA vez, em um PC Windows com internet).
+# Gera installer\Output\ScreenCam_Setup.exe (no GitHub Actions ou em um PC Windows com internet).
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
@@ -50,7 +50,7 @@ if (-not $iscc) {
                 if ($method -eq 'iwr') { Invoke-WebRequest $u -OutFile $setup -UseBasicParsing }
                 else { & curl.exe -L --fail -s -o $setup $u }
                 $ok = (Test-Path $setup) -and ((Get-Item $setup).Length -gt 1MB)
-                if ($ok) { $b = [IO.File]::ReadAllBytes($setup)[0..1]; $ok = ($b[0] -eq 0x4D -and $b[1] -eq 0x5A) }
+                if ($ok) { $hdr = [IO.File]::ReadAllBytes($setup)[0..1]; $ok = ($hdr[0] -eq 0x4D -and $hdr[1] -eq 0x5A) }
                 if (-not $ok) { Write-Host 'Arquivo baixado invalido, tentando outra forma...'; continue }
                 Unblock-File $setup
                 Start-Process $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER' -Wait
@@ -61,6 +61,12 @@ if (-not $iscc) {
     $iscc = Find-Iscc
 }
 if (-not $iscc) { throw 'Nao foi possivel instalar o Inno Setup automaticamente. Instale manualmente em https://jrsoftware.org/isdl.php (versao 6) e rode este arquivo de novo; o resto ja esta baixado.' }
+
+# confere se a versao do programa e a do instalador sao a mesma (evita gerar instalador desatualizado)
+$verPy  = (Select-String -Path (Join-Path $root 'src\screencam.py') -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+$verIss = (Select-String -Path (Join-Path $root 'installer\ScreenCam.iss') -Pattern '#define AppVer "([^"]+)"').Matches[0].Groups[1].Value
+if ($verPy -ne $verIss) { throw "Versoes diferentes: screencam.py=$verPy, ScreenCam.iss=$verIss. Envie os dois arquivos atualizados." }
+Write-Host "Gerando instalador da versao $verPy" -ForegroundColor Cyan
 
 & $iscc (Join-Path $root 'installer\ScreenCam.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao compilar o instalador.' }
